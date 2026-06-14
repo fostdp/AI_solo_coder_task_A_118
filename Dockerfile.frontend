@@ -1,0 +1,15 @@
+FROM nginx:1.27-alpine AS runtime
+
+RUN addgroup -g 101 -S nginx \
+    && adduser -S -D -H -u 101 -h /var/cache/nginx -s /sbin/nologin -G nginx nginx \
+    && rm -rf /usr/share/nginx/html/*
+
+COPY frontend/nginx.conf /etc/nginx/nginx.conf
+COPY frontend/ /usr/share/nginx/html/
+
+EXPOSE 80
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1/ >/dev/null || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]
