@@ -252,7 +252,38 @@ class ApiClient {
     }
 
     async setManualAction(furnaceId, action) {
-        return this.post(`/api/rl/action/${furnaceId}`, action);
+        const payload = {};
+        if (typeof action.frequency === 'number') payload.frequency = action.frequency;
+        if (typeof action.stroke === 'number') payload.stroke = action.stroke;
+        if (action.reason) payload.reason = action.reason;
+        if (action.duration_secs) payload.duration_secs = action.duration_secs;
+        return this.post(`/api/ql/action/${furnaceId}`, payload);
+    }
+
+    async clearManualOverride(furnaceId) {
+        return this.post(`/api/ql/action/${furnaceId}/clear`, {});
+    }
+
+    async getQLStatus(furnaceId) {
+        const url = furnaceId ? `/api/ql/status/${furnaceId}` : '/api/ql/status';
+        return this.get(url);
+    }
+
+    async resetQL(furnaceId) {
+        return this.post(`/api/ql/reset/${furnaceId}`, {});
+    }
+
+    async setControlAlgorithm(algo) {
+        return this.put('/api/ql/algo', { algo });
+    }
+
+    async getControlAlgorithm() {
+        return this.get('/api/ql/algo');
+    }
+
+    async getParamIdStatus(furnaceId) {
+        const url = furnaceId ? `/api/param_id/status/${furnaceId}` : '/api/param_id/status';
+        return this.get(url);
     }
 }
 
