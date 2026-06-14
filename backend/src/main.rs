@@ -72,6 +72,12 @@ struct CliArgs {
     #[arg(long, default_value = "info", env = "LOG_LEVEL")]
     log_level: String,
 
+    #[arg(long, default_value = "text", env = "LOG_FORMAT")]
+    log_format: String,
+
+    #[arg(long, default_value_t = 9090, env = "METRICS_PORT")]
+    metrics_port: u16,
+
     #[arg(long, default_value_t = false)]
     skip_db_check: bool,
 
@@ -95,9 +101,17 @@ const FURNACE_CONFIGS: &[(&str, &str, FurnaceType, f64, f64, f64, f64, f64, f64,
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = CliArgs::parse();
-    init_logging(&args.log_level);
+    init_logging(&args.log_level, &args.log_format);
+    metallurgy_simulation::metrics::init_metrics();
 
     println_banner();
+
+    let metrics_addr = format!("0.0.0.0:{}", args.metrics_port);
+    let metrics_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_http_listener(metrics_addr.parse::<std::net::SocketAddr>().unwrap())
+        .install()
+        .context("安装Prometheus metrics导出器失败")?;
+    info!(metrics_port = args.metrics_port, "Prometheus metrics exporter 已启动");
 
     let mut sys_config = SystemConfig::from_env();
     sys_config.server.host = args.host.clone();
@@ -320,6 +334,8 @@ async fn main() -> Result<()> {
     println!("     GET  /api/param_id/status           - 参数辨识状态");
     println!("     PUT  /api/ql/algo                   - 切换控制算法");
     println!("     WS   /ws                            - WebSocket实时推送");
+    println!("   可观测性:");
+    println!("     GET  http://0.0.0.0:{}/metrics       - Prometheus指标", args.metrics_port);
     println!();
 
     let listener = TcpListener::bind(&listen_addr)
@@ -342,20 +358,32 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_logging(level: &str) {
+fn init_logging(level: &str, format: &str) {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
 
-    tracing_subscriber::fmt()
+    let use_json = format.eq_ignore_ascii_case("json");
+
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(true)
         .with_thread_ids(true)
         .with_line_number(true)
         .with_file(false)
         .with_level(true)
-        .with_ansi(true)
-        .compact()
-        .init();
+        .with_ansi(!use_json);
+
+    if use_json {
+        subscriber
+            .json()
+            .flatten_event(true)
+            .with_current_span(true)
+            .with_span_list(true)
+            .init();
+    } else {
+        subscriber.compact().init();
+    }
+    let _ = tracing_log::LogTracer::init();
 }
 
 async fn init_storage(config: &SystemConfig) -> Result<ClickHouseStore> {
