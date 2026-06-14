@@ -243,7 +243,11 @@ def noise(seed: float, t: float, scale: float) -> float:
     return scale * (math.sin(seed + t * 0.5) * 0.3 + random.uniform(-0.5, 0.5))
 
 
-def simulate_step(state: FurnaceState, dt: float = 10.0) -> Dict:
+def simulate_step(state: FurnaceState, dt: float = 10.0,
+                  fixed_frequency: Optional[float] = None,
+                  fixed_stroke: Optional[float] = None,
+                  freq_noise: float = 3.0,
+                  stroke_noise: float = 2.5) -> Dict:
     state.elapsed_seconds += dt
     t = state.elapsed_seconds
 
@@ -253,8 +257,17 @@ def simulate_step(state: FurnaceState, dt: float = 10.0) -> Dict:
     air_preheat = 200.0 if state.config.furnace_type == "Han_Chaogang" else 300.0
     bore_area = 0.08 if state.config.furnace_type == "Han_Chaogang" else 0.15
 
-    state.frequency = state.config.base_frequency + noise(state.noise_seed, t, 3.0)
-    state.stroke = state.config.base_stroke + noise(state.noise_seed + 1, t, 2.5)
+    if fixed_frequency is not None:
+        state.frequency = fixed_frequency + noise(state.noise_seed, t, freq_noise)
+        state.config.base_frequency = fixed_frequency
+    else:
+        state.frequency = state.config.base_frequency + noise(state.noise_seed, t, freq_noise)
+
+    if fixed_stroke is not None:
+        state.stroke = fixed_stroke + noise(state.noise_seed + 1, t, stroke_noise)
+        state.config.base_stroke = fixed_stroke
+    else:
+        state.stroke = state.config.base_stroke + noise(state.noise_seed + 1, t, stroke_noise)
 
     state.air_volume = BellowsSimulator.calc_air_volume(state.frequency, state.stroke, bore_area)
     state.pressure = BellowsSimulator.calc_pressure(state.frequency, state.stroke, 3.5)
@@ -437,6 +450,42 @@ def main():
         action="store_true",
         help="只模拟不上报",
     )
+    parser.add_argument(
+        "--freq",
+        type=float,
+        default=None,
+        help="固定风箱推拉频率 (次/分)，默认使用内置动态模型",
+    )
+    parser.add_argument(
+        "--stroke",
+        type=float,
+        default=None,
+        help="固定风箱行程 (cm)，默认使用内置动态模型",
+    )
+    parser.add_argument(
+        "--freq-noise",
+        type=float,
+        default=3.0,
+        help="频率高斯噪声强度 (默认3.0)",
+    )
+    parser.add_argument(
+        "--stroke-noise",
+        type=float,
+        default=2.5,
+        help="行程高斯噪声强度 (默认2.5)",
+    )
+    parser.add_argument(
+        "--follow-rl",
+        action="store_true",
+        default=True,
+        help="遵循后端RL返回的动作覆盖freq/stroke（默认开启）",
+    )
+    parser.add_argument(
+        "--no-follow-rl",
+        action="store_false",
+        dest="follow_rl",
+        help="忽略后端RL返回的动作，坚持使用--freq/--stroke",
+    )
     args = parser.parse_args()
 
     global BACKEND_URL
@@ -455,7 +504,12 @@ def main():
         sys.exit(1)
 
     print(f"\n[模拟器启动] 共 {len(states)} 座炉, 上报间隔 {args.interval}s")
+    if args.freq is not None:
+        print(f"[固定参数] 频率={args.freq} 次/分, 噪声=±{args.freq_noise}")
+    if args.stroke is not None:
+        print(f"[固定参数] 行程={args.stroke} cm, 噪声=±{args.stroke_noise}")
     print(f"[后端地址] {BACKEND_URL}")
+    print(f"[RL跟随] {'开启' if args.follow_rl else '关闭'}")
     print(f"[模式] {'DRY RUN' if args.dry_run else '正常上报'}")
     print("-" * 80)
 
@@ -466,7 +520,14 @@ def main():
             ts = time.strftime("%Y-%m-%d %H:%M:%S")
 
             for fid, state in states.items():
-                data = simulate_step(state, dt=args.interval)
+                data = simulate_step(
+                    state,
+                    dt=args.interval,
+                    fixed_frequency=args.freq,
+                    fixed_stroke=args.stroke,
+                    freq_noise=args.freq_noise,
+                    stroke_noise=args.stroke_noise,
+                )
 
                 if args.verbose or step_count % 6 == 0:
                     print(f"[{ts}] [{fid}] "
@@ -482,7 +543,7 @@ def main():
 
                 if not args.dry_run:
                     success, action = send_to_backend(data)
-                    if success and action:
+                    if success and action and args.follow_rl:
                         apply_rl_action(state, action)
                         if args.verbose:
                             print(f"          ↳ RL动作: 频率→{action.get('frequency', 'N/A')}, "
