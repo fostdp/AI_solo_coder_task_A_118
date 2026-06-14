@@ -26,6 +26,8 @@ pub const NUM_ZONES: usize = 5;
 pub struct ThermodynamicsEngine {
     config: FurnaceConfig,
     params: ThermoParams,
+    identified_params: crate::parameter_id::IdentifiedParams,
+    use_online_id: bool,
     history_len: usize,
     temp_history: VecDeque<f64>,
     temp_zones_history: VecDeque<[f64; NUM_ZONES]>,
@@ -34,14 +36,46 @@ pub struct ThermodynamicsEngine {
 
 impl ThermodynamicsEngine {
     pub fn new(config: FurnaceConfig, params: ThermoParams) -> Self {
+        let identified = crate::parameter_id::IdentifiedParams {
+            activation_energy: params.activation_energy,
+            pre_exponential_factor: params.pre_exponential_factor,
+            heat_loss_coefficient: params.heat_loss_coefficient,
+            heat_transfer_coeff: params.heat_conductivity,
+            confidence: 0.0,
+            sample_count: 0,
+            residuals_mse: f64::MAX,
+        };
         Self {
             config,
             params,
+            identified_params: identified,
+            use_online_id: false,
             history_len: 100,
             temp_history: VecDeque::with_capacity(100),
             temp_zones_history: VecDeque::with_capacity(100),
             last_update: None,
         }
+    }
+
+    pub fn apply_identified_params(&mut self, identified: &crate::parameter_id::IdentifiedParams) {
+        if identified.confidence > 0.35 && identified.sample_count >= 10 {
+            self.identified_params = identified.clone();
+            self.use_online_id = true;
+            self.params.activation_energy = identified.activation_energy;
+            self.params.pre_exponential_factor = identified.pre_exponential_factor;
+            self.params.heat_loss_coefficient = identified.heat_loss_coefficient;
+            self.params.heat_conductivity = identified.heat_transfer_coeff;
+        } else {
+            self.use_online_id = false;
+        }
+    }
+
+    pub fn is_using_online_id(&self) -> bool {
+        self.use_online_id
+    }
+
+    pub fn identified(&self) -> &crate::parameter_id::IdentifiedParams {
+        &self.identified_params
     }
 
     pub fn arrhenius_reaction_rate(
@@ -50,9 +84,20 @@ impl ThermodynamicsEngine {
         o2_conc: f64,
         coal_feed: f64,
     ) -> f64 {
+        let (ea, a_factor) = if self.use_online_id {
+            (
+                self.identified_params.activation_energy,
+                self.identified_params.pre_exponential_factor,
+            )
+        } else {
+            (
+                self.params.activation_energy,
+                self.params.pre_exponential_factor,
+            )
+        };
         let temp_k = temp + 273.15;
-        let exponent = -self.params.activation_energy / (GAS_CONSTANT_R * temp_k);
-        let base_rate = self.params.pre_exponential_factor * exponent.exp();
+        let exponent = -ea / (GAS_CONSTANT_R * temp_k);
+        let base_rate = a_factor * exponent.exp();
         let o2_factor = (o2_conc / 21.0).max(0.1);
         let coal_factor = coal_feed.max(0.01);
         base_rate * o2_factor * coal_factor * 1e-8
@@ -73,7 +118,12 @@ impl ThermodynamicsEngine {
         let volume = self.config.volume_m3;
         let surface_area = 6.0 * (volume.powf(2.0 / 3.0));
         let delta_t = (temp - AMBIENT_TEMP).max(0.0);
-        self.params.heat_loss_coefficient * surface_area * delta_t * dt
+        let hlc = if self.use_online_id {
+            self.identified_params.heat_loss_coefficient
+        } else {
+            self.params.heat_loss_coefficient
+        };
+        hlc * surface_area * delta_t * dt
     }
 
     pub fn air_heat_transfer(
