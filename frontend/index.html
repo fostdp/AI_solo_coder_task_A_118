@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代风箱鼓风冶铁过程热力学模拟与炉温控制仿真系统</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="app">
+        <header class="main-header">
+            <div class="logo-area">
+                <div class="logo-icon">⚒️</div>
+                <div class="logo-text">
+                    <h1>古代风箱鼓风冶铁仿真系统</h1>
+                    <p class="subtitle">Metallurgy Bellows Simulation &amp; Furnace Temp Control</p>
+                </div>
+            </div>
+            <div class="header-controls">
+                <div class="connection-status" id="connStatus">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="statusText">连接中...</span>
+                </div>
+                <select id="furnaceSelector" class="furnace-select">
+                    <option value="HAN-001">汉代炒钢炉一号 (HAN-001)</option>
+                    <option value="MING-001">明代高炉一号 (MING-001)</option>
+                </select>
+                <div class="current-time" id="currentTime"></div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <aside class="left-panel">
+                <div class="panel-section">
+                    <h3 class="section-title"><span class="icon">🔥</span>实时监测数据</h3>
+                    <div class="metrics-grid" id="metricsGrid">
+                        <div class="metric-card" id="metricTemp">
+                            <div class="metric-label">炉内温度</div>
+                            <div class="metric-value temp-value" id="valFurnaceTemp">--</div>
+                            <div class="metric-unit">°C</div>
+                            <div class="metric-bar">
+                                <div class="metric-bar-fill temp-bar" id="barTemp"></div>
+                            </div>
+                        </div>
+                        <div class="metric-card" id="metricCo">
+                            <div class="metric-label">CO 浓度</div>
+                            <div class="metric-value co-value" id="valCo">--</div>
+                            <div class="metric-unit">%</div>
+                            <div class="metric-bar">
+                                <div class="metric-bar-fill co-bar" id="barCo"></div>
+                            </div>
+                        </div>
+                        <div class="metric-card" id="metricFreq">
+                            <div class="metric-label">推拉频率</div>
+                            <div class="metric-value" id="valFreq">--</div>
+                            <div class="metric-unit">次/分</div>
+                            <div class="metric-bar">
+                                <div class="metric-bar-fill freq-bar" id="barFreq"></div>
+                            </div>
+                        </div>
+                        <div class="metric-card" id="metricStroke">
+                            <div class="metric-label">风箱行程</div>
+                            <div class="metric-value" id="valStroke">--</div>
+                            <div class="metric-unit">cm</div>
+                            <div class="metric-bar">
+                                <div class="metric-bar-fill stroke-bar" id="barStroke"></div>
+                            </div>
+                        </div>
+                        <div class="metric-card" id="metricPressure">
+                            <div class="metric-label">风压</div>
+                            <div class="metric-value" id="valPressure">--</div>
+                            <div class="metric-unit">Pa</div>
+                        </div>
+                        <div class="metric-card" id="metricAirVol">
+                            <div class="metric-label">风量</div>
+                            <div class="metric-value" id="valAirVol">--</div>
+                            <div class="metric-unit">m³/s</div>
+                        </div>
+                        <div class="metric-card" id="metricEff">
+                            <div class="metric-label">能源效率</div>
+                            <div class="metric-value eff-value" id="valEff">--</div>
+                            <div class="metric-unit">%</div>
+                            <div class="metric-bar">
+                                <div class="metric-bar-fill eff-bar" id="barEff"></div>
+                            </div>
+                        </div>
+                        <div class="metric-card" id="metricIron">
+                            <div class="metric-label">生铁累计产量</div>
+                            <div class="metric-value iron-value" id="valIron">--</div>
+                            <div class="metric-unit">kg</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3 class="section-title"><span class="icon">🌡️</span>多层温度分布</h3>
+                    <div class="temp-zones" id="tempZones">
+                        <div class="temp-zone">
+                            <span class="zone-name">炉顶</span>
+                            <div class="zone-bar" id="zoneTop"></div>
+                            <span class="zone-temp" id="valZoneTop">--</span>
+                        </div>
+                        <div class="temp-zone">
+                            <span class="zone-name">上部</span>
+                            <div class="zone-bar" id="zoneUpper"></div>
+                            <span class="zone-temp" id="valZoneUpper">--</span>
+                        </div>
+                        <div class="temp-zone">
+                            <span class="zone-name">中部</span>
+                            <div class="zone-bar" id="zoneMiddle"></div>
+                            <span class="zone-temp" id="valZoneMiddle">--</span>
+                        </div>
+                        <div class="temp-zone">
+                            <span class="zone-name">下部</span>
+                            <div class="zone-bar" id="zoneLower"></div>
+                            <span class="zone-temp" id="valZoneLower">--</span>
+                        </div>
+                        <div class="temp-zone">
+                            <span class="zone-name">炉缸</span>
+                            <div class="zone-bar" id="zoneHearth"></div>
+                            <span class="zone-temp" id="valZoneHearth">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3 class="section-title"><span class="icon">🎛️</span>RL 控制优化</h3>
+                    <div class="rl-info">
+                        <div class="rl-row">
+                            <span>回合数</span>
+                            <span class="rl-val" id="rlEpisode">--</span>
+                        </div>
+                        <div class="rl-row">
+                            <span>步数</span>
+                            <span class="rl-val" id="rlStep">--</span>
+                        </div>
+                        <div class="rl-row">
+                            <span>探索率 ε</span>
+                            <span class="rl-val" id="rlEpsilon">--</span>
+                        </div>
+                        <div class="rl-row">
+                            <span>最近奖励</span>
+                            <span class="rl-val" id="rlReward">--</span>
+                        </div>
+                        <div class="rl-row">
+                            <span>经验回放</span>
+                            <span class="rl-val" id="rlBuffer">--</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="center-panel">
+                <div class="center-top">
+                    <div class="viz-container">
+                        <div class="viz-header">
+                            <h3 class="section-title"><span class="icon">🏭</span>冶炼炉剖面3D模型</h3>
+                            <div class="viz-legend" id="furnace3dLegend">
+                                <span><i style="background:#ff6b35"></i>高温区</span>
+                                <span><i style="background:#ffc857"></i>中温区</span>
+                                <span><i style="background:#4ecdc4"></i>低温区</span>
+                            </div>
+                        </div>
+                        <div id="furnace3d" class="viz-canvas-container"></div>
+                    </div>
+                    <div class="viz-container">
+                        <div class="viz-header">
+                            <h3 class="section-title"><span class="icon">💨</span>风箱活塞运动</h3>
+                            <div class="viz-stats">
+                                <span>当前: <b id="bellowsStatus">待机</b></span>
+                            </div>
+                        </div>
+                        <canvas id="bellowsCanvas" class="viz-canvas-container" width="500" height="320"></canvas>
+                    </div>
+                </div>
+
+                <div class="center-bottom">
+                    <div class="viz-container full-width">
+                        <div class="viz-header">
+                            <h3 class="section-title"><span class="icon">🌈</span>炉内温度云图</h3>
+                            <div class="temp-scale">
+                                <span class="temp-scale-label" id="tempScaleMin">400°C</span>
+                                <div class="temp-gradient"></div>
+                                <span class="temp-scale-label" id="tempScaleMax">1600°C</span>
+                            </div>
+                        </div>
+                        <canvas id="tempFieldCanvas" class="viz-canvas-container temp-field-canvas" width="1200" height="400"></canvas>
+                    </div>
+                </div>
+            </main>
+
+            <aside class="right-panel">
+                <div class="panel-section">
+                    <h3 class="section-title"><span class="icon">📈</span>温度历史趋势</h3>
+                    <canvas id="tempChartCanvas" width="380" height="220"></canvas>
+                    <div class="chart-legend">
+                        <span class="legend-item"><span class="legend-dot temp-dot"></span>炉温</span>
+                        <span class="legend-item"><span class="legend-dot target-dot"></span>目标区间</span>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3 class="section-title"><span class="icon">⚙️</span>手动控制面板</h3>
+                    <div class="control-group">
+                        <label>风箱推拉频率 (次/分)</label>
+                        <div class="slider-row">
+                            <input type="range" id="sliderFreq" min="10" max="60" value="30">
+                            <span id="sliderFreqVal">30</span>
+                        </div>
+                    </div>
+                    <div class="control-group">
+                        <label>风箱行程 (cm)</label>
+                        <div class="slider-row">
+                            <input type="range" id="sliderStroke" min="15" max="80" value="45">
+                            <span id="sliderStrokeVal">45</span>
+                        </div>
+                    </div>
+                    <div class="control-buttons">
+                        <button id="btnApplyControl" class="btn btn-primary">应用控制参数</button>
+                        <button id="btnAutoControl" class="btn btn-secondary">启用自动RL</button>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3 class="section-title">
+                        <span class="icon">🔔</span>告警中心
+                        <span class="alarm-badge" id="alarmCount">0</span>
+                    </h3>
+                    <div class="alarm-list" id="alarmList">
+                        <div class="alarm-empty">暂无告警</div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3 class="section-title"><span class="icon">📊</span>热力学参数</h3>
+                    <div class="thermo-info">
+                        <div class="thermo-row"><span>热传导系数</span><span id="thermoCond">45 W/(m·K)</span></div>
+                        <div class="thermo-row"><span>比热容</span><span id="thermoHeat">650 J/(kg·K)</span></div>
+                        <div class="thermo-row"><span>活化能</span><span id="thermoAct">160 kJ/mol</span></div>
+                        <div class="thermo-row"><span>热损失系数</span><span id="thermoLoss">0.015</span></div>
+                        <div class="thermo-row"><span>预热空气温度</span><span id="thermoPreheat">200 °C</span></div>
+                        <div class="thermo-row"><span>反应速率</span><span id="thermoRate">-- mol/s</span></div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <div id="toastContainer" class="toast-container"></div>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>
