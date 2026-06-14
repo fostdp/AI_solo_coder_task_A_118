@@ -18,9 +18,12 @@ impl FurnaceType {
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
+        let s = s.trim();
         match s {
-            "Han_Chaogang" => Some(FurnaceType::HanChaogang),
-            "Ming_Blast" => Some(FurnaceType::MingBlast),
+            "Han_Chaogang" | "HanChaogang" | "han" | "HAN" => Some(FurnaceType::HanChaogang),
+            "Ming_Blast" | "MingBlast" | "Ming_Gaolu" | "MingGaolu" | "ming" | "MING" => {
+                Some(FurnaceType::MingBlast)
+            }
             _ => None,
         }
     }
