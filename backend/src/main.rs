@@ -12,6 +12,8 @@ use tracing_subscriber::EnvFilter;
 use metallurgy_simulation::*;
 use metallurgy_simulation::api::AppState;
 use metallurgy_simulation::models::{FurnaceConfig, FurnaceType, ThermoParams};
+use metallurgy_simulation::parameter_id::MultiFurnaceIdentifier;
+use metallurgy_simulation::qlearning::MultiFurnaceQLController;
 use metallurgy_simulation::thermodynamics::MultiFurnaceThermoEngine;
 use metallurgy_simulation::rl_control::MultiFurnaceRLController;
 use metallurgy_simulation::mqtt::{AlarmDetector, MqttConfig, MqttPublisher};
@@ -95,6 +97,8 @@ async fn main() -> Result<()> {
     let store = init_storage(&args).await?;
     let mut thermo_engine = MultiFurnaceThermoEngine::new();
     let mut rl_controller = MultiFurnaceRLController::new();
+    let mut ql_controller = MultiFurnaceQLController::new();
+    let mut param_identifier = MultiFurnaceIdentifier::new();
     let mut alarm_detector = AlarmDetector::new();
 
     for cfg in FURNACE_CONFIGS {
@@ -121,6 +125,8 @@ async fn main() -> Result<()> {
 
         thermo_engine.add_furnace(furnace_config.clone(), thermo_params);
         rl_controller.add_furnace(cfg.0.to_string());
+        ql_controller.add_furnace(cfg.0.to_string(), furnace_config);
+        param_identifier.add_furnace(cfg.0.to_string(), (cfg.10, cfg.11, cfg.12));
 
         info!("  [初始化] {} ({}) - 目标温度: {:.0}-{:.0}°C",
             cfg.1, cfg.0, cfg.5, cfg.6);
@@ -148,6 +154,8 @@ async fn main() -> Result<()> {
         store.clone(),
         thermo_engine,
         rl_controller,
+        ql_controller,
+        param_identifier,
         alarm_detector,
         mqtt_publisher,
     ));
@@ -178,7 +186,10 @@ async fn main() -> Result<()> {
     println!("     POST /api/sensor/report             - 传感器数据上报");
     println!("     GET  /api/furnaces/:id/temp_field   - 温度云图");
     println!("     GET  /api/alarms/                   - 告警列表");
-    println!("     GET  /api/rl/status                 - RL训练状态");
+    println!("     GET  /api/ql/status                 - Q-Learning训练状态(默认)");
+    println!("     GET  /api/rl/status                 - DDPG训练状态(兼容)");
+    println!("     GET  /api/param_id/status           - 参数辨识状态");
+    println!("     PUT  /api/ql/algo                   - 切换控制算法");
     println!("     WS   /ws                            - WebSocket实时推送");
     println!();
 
