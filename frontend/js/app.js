@@ -3,6 +3,7 @@ import { Furnace3D } from './furnace3d.js';
 import { BellowsAnimation } from './bellows.js';
 import { TempFieldVisualization } from './tempField.js';
 import { TemperatureChart } from './tempChart.js';
+import { ControlPanel } from './control_panel.js';
 
 const CONFIG = {
     API_BASE_URL: (location.origin.includes('localhost') || location.hostname === '127.0.0.1')
@@ -30,12 +31,20 @@ class MetallurgyApp {
     async init() {
         this.setupEventListeners();
         this.initVisualizations();
+        this.initControlPanel();
         this.updateCurrentTime();
         setInterval(() => this.updateCurrentTime(), 1000);
 
         await this.loadFurnaceConfigs();
+        if (this.controlPanel) {
+            this.controlPanel.setFurnaceList(Object.values(this.furnaceConfigs));
+        }
         this.initWebSocket();
         this.loadInitialData();
+        if (this.controlPanel) {
+            setTimeout(() => this.controlPanel.refreshStatus(), 800);
+            setInterval(() => this.controlPanel.refreshStatus(), 15000);
+        }
 
         setInterval(() => {
             if (!this.ws || !this.ws.isConnected) {
@@ -106,6 +115,40 @@ class MetallurgyApp {
             console.log('[App] 温度图表初始化完成');
         } catch (e) {
             console.error('[App] 温度图表初始化失败:', e);
+        }
+    }
+
+    initControlPanel() {
+        try {
+            this.controlPanel = new ControlPanel({
+                containerId: 'controlPanel',
+                apiBaseUrl: CONFIG.API_BASE_URL,
+                initialFurnaceId: this.currentFurnaceId,
+                furnaces: Object.values(this.furnaceConfigs),
+                initialMode: 'auto',
+            });
+
+            this.controlPanel.on('furnaceChange', (id) => {
+                this.switchFurnace(id);
+                const topSel = document.getElementById('furnaceSelector');
+                if (topSel) topSel.value = id;
+            });
+            this.controlPanel.on('modeChange', (mode) => {
+                console.log('[App] 控制模式切换:', mode);
+            });
+            this.controlPanel.on('manualAction', (params) => {
+                console.log('[App] 手动动作下发:', params);
+                this.showToast(`手动参数已下发: ${params.frequency}次/分, ${params.stroke}cm`, 'info');
+            });
+            this.controlPanel.on('quickAction', (action) => {
+                this.showToast(`快捷动作 "${action.type}" 已执行`, 'info');
+            });
+            this.controlPanel.on('rlReset', (id) => {
+                this.showToast(`炉 ${id} 的控制器已重置`, 'info');
+            });
+            console.log('[App] ControlPanel 初始化完成');
+        } catch (e) {
+            console.error('[App] ControlPanel 初始化失败:', e);
         }
     }
 
