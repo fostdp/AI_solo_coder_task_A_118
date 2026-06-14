@@ -18,11 +18,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
+use crate::alarm_mqtt::AlarmMqttRequest;
+use crate::control_optimizer::{ControlRequest, ControlResponse};
 use crate::models::*;
 use crate::parameter_id::MultiFurnaceIdentifier;
 use crate::qlearning::MultiFurnaceQLController;
 use crate::storage::ClickHouseStore;
 use crate::thermodynamics::{MultiFurnaceThermoEngine, temp_to_hex};
+use crate::thermodynamics_simulator::ThermoRequest;
 use crate::rl_control::MultiFurnaceRLController;
 use crate::mqtt::{AlarmDetector, MqttPublisher, MqttAlarmMessage};
 
@@ -49,6 +52,17 @@ pub struct AppState {
     pub alarm_broadcast: broadcast::Sender<AlarmEvent>,
     pub last_readings: DashMap<String, SensorReading>,
     pub prev_temps: DashMap<String, f64>,
+
+    pub sensor_tx: Option<mpsc::Sender<SensorReading>>,
+    pub thermo_req_tx: Option<mpsc::Sender<ThermoRequest>>,
+    pub control_req_tx: Option<mpsc::Sender<ControlRequest>>,
+    pub alarm_req_tx: Option<mpsc::Sender<AlarmMqttRequest>>,
+    pub action_broadcast: Option<broadcast::Sender<ControlResponse>>,
+
+    pub read_thermo: Option<Arc<tokio::sync::RwLock<MultiFurnaceThermoEngine>>>,
+    pub read_ql: Option<Arc<tokio::sync::RwLock<MultiFurnaceQLController>>>,
+    pub read_pid: Option<Arc<tokio::sync::RwLock<MultiFurnaceIdentifier>>>,
+    pub read_algo: Option<Arc<tokio::sync::RwLock<ControlAlgo>>>,
 }
 
 impl AppState {
@@ -78,7 +92,51 @@ impl AppState {
             alarm_broadcast: alarm_tx,
             last_readings: DashMap::new(),
             prev_temps: DashMap::new(),
+            sensor_tx: None,
+            thermo_req_tx: None,
+            control_req_tx: None,
+            alarm_req_tx: None,
+            action_broadcast: None,
+            read_thermo: None,
+            read_ql: None,
+            read_pid: None,
+            read_algo: None,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn inject_channels(
+        &mut self,
+        sensor_tx: mpsc::Sender<SensorReading>,
+        thermo_req_tx: mpsc::Sender<ThermoRequest>,
+        control_req_tx: mpsc::Sender<ControlRequest>,
+        alarm_req_tx: mpsc::Sender<AlarmMqttRequest>,
+        sensor_broadcast: broadcast::Sender<SensorReading>,
+        alarm_broadcast: broadcast::Sender<AlarmEvent>,
+        action_broadcast: broadcast::Sender<ControlResponse>,
+        read_thermo: tokio::sync::RwLock<MultiFurnaceThermoEngine>,
+        read_ql: tokio::sync::RwLock<MultiFurnaceQLController>,
+        read_pid: tokio::sync::RwLock<MultiFurnaceIdentifier>,
+        read_algo: tokio::sync::RwLock<ControlAlgo>,
+    ) {
+        self.sensor_tx = Some(sensor_tx);
+        self.thermo_req_tx = Some(thermo_req_tx);
+        self.control_req_tx = Some(control_req_tx);
+        self.alarm_req_tx = Some(alarm_req_tx);
+        self.sensor_broadcast = sensor_broadcast;
+        self.alarm_broadcast = alarm_broadcast;
+        self.action_broadcast = Some(action_broadcast);
+        self.read_thermo = Some(Arc::new(read_thermo));
+        self.read_ql = Some(Arc::new(read_ql));
+        self.read_pid = Some(Arc::new(read_pid));
+        self.read_algo = Some(Arc::new(read_algo));
+    }
+
+    pub fn send_to_actors(&self, reading: &SensorReading) -> bool {
+        let Some(tx) = &self.sensor_tx else {
+            return false;
+        };
+        matches!(tx.try_send(reading.clone()), Ok(_))
     }
 }
 
@@ -438,6 +496,33 @@ async fn report_sensor_data(
     }
 
     state.last_readings.insert(furnace_id.clone(), reading.clone());
+
+    if state.send_to_actors(&reading) {
+        let rl_action = RLAction {
+            frequency: reading.push_pull_frequency,
+            stroke: reading.stroke_length,
+            timestamp: reading.timestamp,
+            q_value: None,
+        };
+        let _ = state.sensor_broadcast.send(reading.clone());
+        let broadcast_msg = WSMessage::sensor(&reading);
+        for session in state.ws_sessions.iter() {
+            let _ = session.value().send(broadcast_msg.clone());
+        }
+
+        let resp = ApiResponse::ok_with_action(
+            serde_json::json!({
+                "stored": true,
+                "timestamp": reading.timestamp.to_rfc3339(),
+                "furnace": furnace_id,
+                "pipelined": true,
+            }),
+            rl_action,
+        );
+        return Json(resp);
+    }
+
+    warn!("Actor管道未就绪，回退到内嵌处理");
 
     let prev_temp = state.prev_temps.get(&furnace_id).map(|r| *r).unwrap_or(reading.furnace_temp);
     state.prev_temps.insert(furnace_id.clone(), reading.furnace_temp);
