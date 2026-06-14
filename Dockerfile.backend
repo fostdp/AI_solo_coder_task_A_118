@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.6
+
+FROM lukemathwalker/cargo-chef:latest-rust-1.77 AS chef
+WORKDIR /app
+
+FROM chef AS planner
+COPY backend/Cargo.toml backend/Cargo.lock ./
+COPY backend/src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+ARG CARGO_PROFILE=release
+ENV CARGO_PROFILE=${CARGO_PROFILE}
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --profile ${CARGO_PROFILE} --recipe-path recipe.json
+COPY backend/Cargo.toml backend/Cargo.lock ./
+COPY backend/src ./src
+RUN cargo build --profile ${CARGO_PROFILE} --bin metallurgy-simulation-server \
+    && mkdir -p /out \
+    && cp target/${CARGO_PROFILE}/metallurgy-simulation-server /out/
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 curl tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid 10001 --shell /bin/bash --create-home app
+
+ENV TZ=Asia/Shanghai
+ENV RUST_LOG=info
+ENV LOG_FORMAT=json
+ENV SERVER_HOST=0.0.0.0
+ENV SERVER_PORT=8080
+ENV METRICS_PORT=9090
+
+WORKDIR /app
+COPY --from=builder /out/metallurgy-simulation-server /usr/local/bin/
+RUN chmod +x /usr/local/bin/metallurgy-simulation-server
+
+USER app
+EXPOSE 8080 9090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -fsS http://127.0.0.1:8080/api/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/metallurgy-simulation-server"]
