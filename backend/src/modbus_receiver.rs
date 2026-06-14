@@ -168,6 +168,7 @@ impl ModbusReceiver {
 
         while let Some(reading) = sensor_rx.recv().await {
             let received_at = Instant::now();
+            crate::metrics::inc_sensor_readings(&reading.furnace_id);
 
             match self.validate_and_enrich(&reading).await {
                 Ok(validated) => {
@@ -176,6 +177,12 @@ impl ModbusReceiver {
                     valid.latency_us = elapsed.as_micros() as u64;
                     let furnace_id = reading.furnace_id.clone();
                     let accepted = valid.clone();
+                    crate::metrics::inc_sensor_valid(&furnace_id);
+                    crate::metrics::set_furnace_temp(&furnace_id, reading.furnace_temp);
+                    crate::metrics::set_co_conc(&furnace_id, reading.co_concentration);
+                    crate::metrics::set_frequency(&furnace_id, reading.push_pull_frequency);
+                    crate::metrics::set_stroke(&furnace_id, reading.stroke_length);
+                    crate::metrics::set_energy_eff(&furnace_id, reading.energy_efficiency);
 
                     if let Err(e) = validated_tx.send(valid).await {
                         error!("ValidatedReading 通道发送失败: {}", e);
@@ -185,6 +192,7 @@ impl ModbusReceiver {
                 }
                 Err(e) => {
                     warn!("传感器数据校验失败: {} (furnace={})", e, reading.furnace_id);
+                    crate::metrics::inc_sensor_invalid(&reading.furnace_id, e.code);
                     self.record_stats(
                         reading.furnace_id.clone(),
                         None,
