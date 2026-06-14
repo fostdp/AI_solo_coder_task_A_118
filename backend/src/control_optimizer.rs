@@ -165,6 +165,7 @@ impl ControlOptimizer {
                     };
 
                     self_clone.record_action(&reading.furnace_id, &resp).await;
+                    crate::metrics::inc_control_actions(&reading.furnace_id, "manual");
 
                     if let Err(e) = post_tx.send(resp).await {
                         warn!("post_control 手动动作发送失败: {}", e);
@@ -215,6 +216,11 @@ impl ControlOptimizer {
                     };
 
                     self_clone.record_action(&reading.furnace_id, &resp).await;
+                    let mode = match algo {
+                        ControlAlgorithm::QLearning => "qlearning",
+                        ControlAlgorithm::Ddpg => "ddpg",
+                    };
+                    crate::metrics::inc_control_actions(&reading.furnace_id, mode);
 
                     if let Err(e) = post_tx.send(resp).await {
                         warn!("post_control 计算动作发送失败: {}", e);
