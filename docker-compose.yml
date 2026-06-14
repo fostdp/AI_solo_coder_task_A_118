@@ -1,0 +1,222 @@
+name: metallurgy-simulation
+
+services:
+  # ========== ClickHouse 时序数据库 ==========
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3-alpine
+    container_name: metallurgy-clickhouse
+    hostname: clickhouse
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      CLICKHOUSE_DB: metallurgy_simulation
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse:rw
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/custom.xml:ro
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/?query=SELECT%201"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - metallurgy-net
+
+  # ========== MQTT Broker (mosquitto) ==========
+  mqtt:
+    image: eclipse-mosquitto:2.0-openssl
+    container_name: metallurgy-mqtt
+    hostname: mqtt
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+      - mqtt-log:/mosquitto/log
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -t '$$SYS/#' -C 1 -W 2 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - metallurgy-net
+
+  # ========== Rust 后端服务 ==========
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args:
+        CARGO_PROFILE: release
+    container_name: metallurgy-backend
+    hostname: backend
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      RUST_LOG: info
+      LOG_FORMAT: json
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8080"
+      METRICS_PORT: "9090"
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: metallurgy_simulation
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      MQTT_BROKER: mqtt
+      MQTT_PORT: "1883"
+      MQTT_TOPIC_PREFIX: metallurgy/alarms
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - metallurgy-net
+
+  # ========== 风箱模拟器 ==========
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.simulator
+    container_name: metallurgy-simulator
+    hostname: simulator
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    command: >
+      --backend http://backend:8080/api/sensor/report
+      --interval 10
+      --furnaces HAN-001 MING-001
+      --freq-noise 3.0
+      --stroke-noise 2.5
+      --follow-rl
+      -v
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f bellows_simulator.py || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - metallurgy-net
+
+  # ========== 前端 Nginx ==========
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: metallurgy-frontend
+    hostname: frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "80:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - metallurgy-net
+
+  # ========== Prometheus 指标采集 ==========
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: metallurgy-prometheus
+    hostname: prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9091:9090"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - metallurgy-net
+
+  # ========== Grafana 可视化 ==========
+  grafana:
+    image: grafana/grafana:11.0.0-ubuntu
+    container_name: metallurgy-grafana
+    hostname: grafana
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: metallurgy@2026
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "grafana-clickhouse-datasource"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+      clickhouse:
+        condition: service_healthy
+    networks:
+      - metallurgy-net
+
+volumes:
+  clickhouse-data:
+    name: metallurgy-clickhouse-data
+  mqtt-data:
+    name: metallurgy-mqtt-data
+  mqtt-log:
+    name: metallurgy-mqtt-log
+  prometheus-data:
+    name: metallurgy-prometheus-data
+  grafana-data:
+    name: metallurgy-grafana-data
+
+networks:
+  metallurgy-net:
+    name: metallurgy-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
