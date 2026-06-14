@@ -19,6 +19,8 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::models::*;
+use crate::parameter_id::MultiFurnaceIdentifier;
+use crate::qlearning::MultiFurnaceQLController;
 use crate::storage::ClickHouseStore;
 use crate::thermodynamics::{MultiFurnaceThermoEngine, temp_to_hex};
 use crate::rl_control::MultiFurnaceRLController;
@@ -26,10 +28,20 @@ use crate::mqtt::{AlarmDetector, MqttPublisher, MqttAlarmMessage};
 
 type SharedState = Arc<AppState>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlAlgo {
+    QLearning,
+    Ddpg,
+}
+
 pub struct AppState {
     pub store: ClickHouseStore,
     pub thermo_engine: tokio::sync::RwLock<MultiFurnaceThermoEngine>,
     pub rl_controller: MultiFurnaceRLController,
+    pub ql_controller: tokio::sync::RwLock<MultiFurnaceQLController>,
+    pub param_identifier: tokio::sync::RwLock<MultiFurnaceIdentifier>,
+    pub control_algo: tokio::sync::RwLock<ControlAlgo>,
     pub alarm_detector: tokio::sync::Mutex<AlarmDetector>,
     pub mqtt_publisher: MqttPublisher,
     pub ws_sessions: DashMap<String, broadcast::Sender<WSMessage>>,
@@ -44,6 +56,8 @@ impl AppState {
         store: ClickHouseStore,
         thermo_engine: MultiFurnaceThermoEngine,
         rl_controller: MultiFurnaceRLController,
+        ql_controller: MultiFurnaceQLController,
+        param_identifier: MultiFurnaceIdentifier,
         alarm_detector: AlarmDetector,
         mqtt_publisher: MqttPublisher,
     ) -> Self {
@@ -54,6 +68,9 @@ impl AppState {
             store,
             thermo_engine: tokio::sync::RwLock::new(thermo_engine),
             rl_controller,
+            ql_controller: tokio::sync::RwLock::new(ql_controller),
+            param_identifier: tokio::sync::RwLock::new(param_identifier),
+            control_algo: tokio::sync::RwLock::new(ControlAlgo::QLearning),
             alarm_detector: tokio::sync::Mutex::new(alarm_detector),
             mqtt_publisher,
             ws_sessions: DashMap::new(),
@@ -105,6 +122,9 @@ pub struct SystemStatus {
     pub clickhouse_connected: bool,
     pub mqtt_connected: bool,
     pub rl_status: Vec<crate::rl_control::RLStatus>,
+    pub ql_status: Vec<crate::qlearning::QLearningStatus>,
+    pub control_algo: ControlAlgo,
+    pub param_id_status: Vec<crate::parameter_id::IdentifiedParams>,
 }
 
 pub fn build_router(state: SharedState) -> Router {
@@ -117,6 +137,8 @@ pub fn build_router(state: SharedState) -> Router {
         .nest("/api/thermo", thermo_routes())
         .nest("/api/alarms", alarms_routes())
         .nest("/api/rl", rl_routes())
+        .nest("/api/ql", ql_routes())
+        .nest("/api/param_id", param_id_routes())
         .route("/ws", get(ws_handler))
         .layer(Extension(state))
 }
@@ -156,6 +178,21 @@ fn rl_routes() -> Router<SharedState> {
         .route("/action/:furnace_id", get(get_current_action).post(set_manual_action))
 }
 
+fn ql_routes() -> Router<SharedState> {
+    Router::new()
+        .route("/status", get(get_ql_status))
+        .route("/status/:furnace_id", get(get_ql_status_for_furnace))
+        .route("/reset/:furnace_id", post(reset_ql_for_furnace))
+        .route("/algo", get(get_control_algo).put(set_control_algo))
+}
+
+fn param_id_routes() -> Router<SharedState> {
+    Router::new()
+        .route("/status", get(get_param_id_status))
+        .route("/status/:furnace_id", get(get_param_id_for_furnace))
+        .route("/reset/:furnace_id", post(reset_param_id_for_furnace))
+}
+
 async fn root_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "service": "古代风箱鼓风冶铁过程热力学模拟与炉温控制仿真系统",
@@ -191,6 +228,26 @@ async fn get_system_status(State(state): State<SharedState>) -> impl IntoRespons
     let furnaces = state.store.get_furnace_configs().await.unwrap_or_default();
     let ch_ok = state.store.ping().await.unwrap_or(false);
 
+    let ql_statuses: Vec<_> = state
+        .ql_controller
+        .read()
+        .await
+        .all_statuses()
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect();
+
+    let param_id_statuses: Vec<_> = state
+        .param_identifier
+        .read()
+        .await
+        .all_statuses()
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect();
+
+    let algo = *state.control_algo.read().await;
+
     let response = SystemStatus {
         uptime_seconds: 0,
         furnaces,
@@ -199,6 +256,9 @@ async fn get_system_status(State(state): State<SharedState>) -> impl IntoRespons
         clickhouse_connected: ch_ok,
         mqtt_connected: true,
         rl_status: state.rl_controller.get_all_status(),
+        ql_status: ql_statuses,
+        control_algo: algo,
+        param_id_status: param_id_statuses,
     };
 
     Json(ApiResponse::ok(response))
@@ -382,7 +442,55 @@ async fn report_sensor_data(
     let prev_temp = state.prev_temps.get(&furnace_id).map(|r| *r).unwrap_or(reading.furnace_temp);
     state.prev_temps.insert(furnace_id.clone(), reading.furnace_temp);
 
-    let (rl_action, control_step) = state.rl_controller.process_reading(&reading, &config, prev_temp);
+    let identified = {
+        let mut identifier = state.param_identifier.write().await;
+        identifier.process_reading(&furnace_id, &reading, 10.0)
+    };
+
+    {
+        let mut engine = state.thermo_engine.write().await;
+        if let Some(e) = engine.get_engine_mut(&furnace_id) {
+            if let Some(id) = &identified {
+                e.apply_identified_params(id);
+            }
+            e.update_with_reading(&reading);
+        }
+    }
+
+    let algo = *state.control_algo.read().await;
+
+    let (rl_action, control_step) = if algo == ControlAlgo::QLearning {
+        let ql_action = {
+            let mut ql_ctrl = state.ql_controller.write().await;
+            ql_ctrl.select_action(&furnace_id, &reading)
+        };
+        let step = ql_action.as_ref().map(|a| RLControlStep {
+            step_id: uuid::Uuid::new_v4().to_string(),
+            furnace_id: furnace_id.clone(),
+            timestamp: reading.timestamp,
+            state_vector: vec![
+                reading.furnace_temp,
+                reading.co_concentration,
+                reading.energy_efficiency,
+            ],
+            proposed_frequency: a.frequency,
+            proposed_stroke: a.stroke,
+            q_value: a.q_value.unwrap_or(0.0),
+            critic_value: 0.0,
+            reward: 0.0,
+            epsilon: 0.0,
+            episode: 0,
+            algo: "q_learning".to_string(),
+        });
+        (ql_action.unwrap_or(RLAction {
+            frequency: 25.0,
+            stroke: 35.0,
+            timestamp: reading.timestamp,
+            q_value: None,
+        }), step)
+    } else {
+        state.rl_controller.process_reading(&reading, &config, prev_temp)
+    };
 
     if let Some(step) = control_step {
         if let Err(e) = state.store.insert_control_step(&step).await {
@@ -408,13 +516,6 @@ async fn report_sensor_data(
 
             let _ = state.alarm_broadcast.send(alarm.clone());
             alarms_generated.push(alarm.clone());
-        }
-    }
-
-    {
-        let mut engine = state.thermo_engine.write().await;
-        if let Some(e) = engine.get_engine_mut(&furnace_id) {
-            e.update_with_reading(&reading);
         }
     }
 
@@ -671,4 +772,95 @@ async fn handle_websocket(socket: WebSocket, addr: std::net::SocketAddr, state: 
 
     state.ws_sessions.remove(&session_id);
     info!("WebSocket连接关闭: {}, 剩余{}个连接", addr, state.ws_sessions.len());
+}
+
+async fn get_ql_status(State(state): State<SharedState>) -> impl IntoResponse {
+    let statuses: Vec<_> = state
+        .ql_controller
+        .read()
+        .await
+        .all_statuses()
+        .into_iter()
+        .map(|(id, s)| serde_json::json!({ "furnace_id": id, "status": s }))
+        .collect();
+    Json(ApiResponse::ok(serde_json::json!({
+        "algo": "q_learning",
+        "furnaces": statuses
+    })))
+}
+
+async fn get_ql_status_for_furnace(
+    State(state): State<SharedState>,
+    Path(furnace_id): Path<String>,
+) -> impl IntoResponse {
+    match state.ql_controller.read().await.get_status(&furnace_id) {
+        Some(s) => Json(ApiResponse::ok(s)),
+        None => Json(ApiResponse::error("未找到该炉的Q-Learning控制器")),
+    }
+}
+
+async fn reset_ql_for_furnace(
+    State(state): State<SharedState>,
+    Path(furnace_id): Path<String>,
+) -> impl IntoResponse {
+    let mut ctrls = state.ql_controller.write().await;
+    match state.store.get_furnace_config(&furnace_id).await {
+        Ok(Some(cfg)) => {
+            ctrls.add_furnace(furnace_id.clone(), cfg);
+            Json(ApiResponse::ok(serde_json::json!({ "reset": true, "furnace_id": furnace_id })))
+        }
+        _ => Json(ApiResponse::ok(serde_json::json!({ "reset": false, "reason": "not_found" }))),
+    }
+}
+
+async fn get_control_algo(State(state): State<SharedState>) -> impl IntoResponse {
+    let algo = *state.control_algo.read().await;
+    Json(ApiResponse::ok(serde_json::json!({ "current": algo })))
+}
+
+async fn set_control_algo(
+    State(state): State<SharedState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let algo_str = payload.get("algo").and_then(|v| v.as_str()).unwrap_or("q_learning");
+    let algo = match algo_str {
+        "ddpg" | "DDPG" => ControlAlgo::Ddpg,
+        _ => ControlAlgo::QLearning,
+    };
+    *state.control_algo.write().await = algo;
+    info!("切换控制算法为: {:?}", algo);
+    Json(ApiResponse::ok(serde_json::json!({ "switched": true, "algo": algo })))
+}
+
+async fn get_param_id_status(State(state): State<SharedState>) -> impl IntoResponse {
+    let statuses: Vec<_> = state
+        .param_identifier
+        .read()
+        .await
+        .all_statuses()
+        .into_iter()
+        .map(|(id, s)| serde_json::json!({ "furnace_id": id, "identified": s }))
+        .collect();
+    Json(ApiResponse::ok(serde_json::json!({ "furnaces": statuses })))
+}
+
+async fn get_param_id_for_furnace(
+    State(state): State<SharedState>,
+    Path(furnace_id): Path<String>,
+) -> impl IntoResponse {
+    match state.param_identifier.read().await.get_params(&furnace_id) {
+        Some(s) => Json(ApiResponse::ok(s)),
+        None => Json(ApiResponse::error("未找到该炉的参数辨识器")),
+    }
+}
+
+async fn reset_param_id_for_furnace(
+    State(state): State<SharedState>,
+    Path(furnace_id): Path<String>,
+) -> impl IntoResponse {
+    let mut identifiers = state.param_identifier.write().await;
+    if let Some(id) = identifiers.identifiers.get_mut(&furnace_id) {
+        id.reset();
+    }
+    Json(ApiResponse::ok(serde_json::json!({ "reset": true, "furnace_id": furnace_id })))
 }
