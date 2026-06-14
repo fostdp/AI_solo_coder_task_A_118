@@ -234,6 +234,10 @@ impl ThermodynamicsSimulator {
                     fst.avg_temp = fst.avg_temp * (n - 1.0) / n + reading.furnace_temp / n;
                 }
 
+                let algo = if sim_self.thermo_cfg.param_id_enabled {
+                    "arrhenius+rls" } else { "arrhenius" };
+                crate::metrics::inc_thermo_predictions(&furnace_id, algo);
+
                 let resp = ThermoResponse::ReadingProcessed {
                     furnace_id: furnace_id.clone(),
                     predicted: predicted.clone(),
