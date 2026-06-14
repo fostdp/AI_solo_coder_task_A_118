@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS sensor_data (
     push_pull_frequency Float64 COMMENT '风箱推拉频率(次/分钟)',
     stroke_length Float64 COMMENT '风箱行程(cm)',
     wind_pressure Float64 COMMENT '风压(Pa)',
-    air_volume FlowRate(Float64) COMMENT '风量(m3/s)',
+    air_volume Float64 COMMENT '风量(m3/s)',
     furnace_temp Float64 COMMENT '炉内温度(°C)',
     co_concentration Float64 COMMENT 'CO浓度(%)',
     o2_concentration Float64 COMMENT 'O2浓度(%)',
@@ -49,8 +49,13 @@ CREATE TABLE IF NOT EXISTS sensor_data (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (furnace_id, timestamp)
-TTL toDateTime(timestamp) + INTERVAL 1 YEAR
-COMMENT '传感器时序数据表（每10秒上报一次）';
+TTL toDateTime(timestamp) + INTERVAL 30 DAY
+    WHERE quality < 80,
+    toDateTime(timestamp) + INTERVAL 90 DAY
+    WHERE quality >= 80 AND quality < 95,
+    toDateTime(timestamp) + INTERVAL 1 YEAR
+    WHERE quality >= 95
+COMMENT '传感器时序数据表（每10秒上报一次，按数据质量分级TTL：30d/90d/1y）';
 
 -- 热力学模拟参数表
 CREATE TABLE IF NOT EXISTS thermo_simulation_params (
@@ -88,7 +93,8 @@ CREATE TABLE IF NOT EXISTS rl_control_actions (
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (furnace_id, episode, step)
-COMMENT '强化学习控制动作记录表';
+TTL toDateTime(timestamp) + INTERVAL 180 DAY
+COMMENT '强化学习控制动作记录表（保留180天）';
 
 -- 告警事件表
 CREATE TABLE IF NOT EXISTS alarm_events (
@@ -113,7 +119,10 @@ CREATE TABLE IF NOT EXISTS alarm_events (
 ENGINE = ReplacingMergeTree()
 ORDER BY (furnace_id, timestamp)
 PARTITION BY toYYYYMM(timestamp)
-COMMENT '告警事件表';
+TTL toDateTime(timestamp) + INTERVAL 365 DAY
+    WHERE acknowledged = 1,
+    toDateTime(timestamp) + INTERVAL 730 DAY
+COMMENT '告警事件表（已确认1年/未确认2年自动过期）';
 
 -- 生铁产量统计表
 CREATE TABLE IF NOT EXISTS iron_production_stats (
