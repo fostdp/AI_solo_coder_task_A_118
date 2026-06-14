@@ -213,6 +213,9 @@ impl AlarmMqttService {
         let mut fail = 0;
 
         for event in events {
+            let atype = format!("{:?}", event.alarm_type);
+            let alevel = format!("{:?}", event.alarm_level);
+            crate::metrics::inc_alarm(&event.furnace_id, &atype, &alevel);
             self.history.lock().await.push_back(event.clone());
             {
                 let mut hist = self.history.lock().await;
@@ -238,6 +241,14 @@ impl AlarmMqttService {
             let _ = broadcast.send(event);
         }
 
+        let active_count = self.active_alarms
+            .lock()
+            .await
+            .values()
+            .filter(|e| !e.acknowledged)
+            .count();
+        crate::metrics::set_active_alarms(active_count as f64);
+
         debug!(
             "告警检测: 命中{}, MQTT成功{}, 失败{}",
             success + fail,
@@ -251,11 +262,13 @@ impl AlarmMqttService {
         match publisher.publish_alarm(event).await {
             Ok(_) => {
                 self.stats.lock().await.total_published += 1;
+                crate::metrics::inc_mqtt_publish_ok();
                 true
             }
             Err(e) => {
                 warn!("MQTT推送告警失败: {} (event={})", e, event.event_id);
                 self.stats.lock().await.total_failed += 1;
+                crate::metrics::inc_mqtt_publish_err();
                 false
             }
         }
