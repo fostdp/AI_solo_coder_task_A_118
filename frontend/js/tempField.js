@@ -15,20 +15,44 @@ export class TempFieldVisualization {
         this.animationTime = 0;
         this.lastFrameTime = performance.now();
 
+        this._isMobile = this._detectMobile();
+        this._compressFactor = this._isMobile ? 4 : 2;
+
+        this._offscreenCanvas = document.createElement('canvas');
+        this._offscreenCtx = this._offscreenCanvas.getContext('2d');
+        this._compressedData = null;
+        this._lastDataHash = '';
+
+        this._frameCounter = 0;
+        this._drawSkip = this._isMobile ? 2 : 1;
+
         this.resizeCanvas();
         this.generateDefaultField();
 
         this._animate = this._animate.bind(this);
-        window.addEventListener('resize', () => this.resizeCanvas());
+        window.addEventListener('resize', () => {
+            this._isMobile = this._detectMobile();
+            this._compressFactor = this._isMobile ? 4 : 2;
+            this._drawSkip = this._isMobile ? 2 : 1;
+            this.resizeCanvas();
+        });
         this._animate();
+    }
+
+    _detectMobile() {
+        const ua = navigator.userAgent || '';
+        const isTouch = 'ontouchstart' in window;
+        const isSmall = window.innerWidth < 768 || window.innerHeight < 600;
+        return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua)
+            || (isTouch && isSmall);
     }
 
     resizeCanvas() {
         const rect = this.canvas.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-        this.canvas.width = rect.width * dpr;
-        this.canvas.height = rect.height * dpr;
-        this.ctx.scale(dpr, dpr);
+        const dpr = this._isMobile ? 1 : Math.min(window.devicePixelRatio || 1, 1.5);
+        this.canvas.width = Math.floor(rect.width * dpr);
+        this.canvas.height = Math.floor(rect.height * dpr);
+        this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         this.displayWidth = rect.width;
         this.displayHeight = rect.height;
     }
@@ -74,6 +98,7 @@ export class TempFieldVisualization {
                 this.colorData[r][c] = this._tempToRgba(temp);
             }
         }
+        this._compressFieldData();
     }
 
     updateData(apiData) {
@@ -88,6 +113,7 @@ export class TempFieldVisualization {
                 cols: this.fieldData[0]?.length || this.resolution.cols
             };
             this.colorData = apiData.color_data;
+            this._compressFieldData();
         } else if (apiData.zones) {
             this._regenerateFromZones();
         }
@@ -100,6 +126,74 @@ export class TempFieldVisualization {
             const elMax = document.getElementById('tempScaleMax');
             if (elMax) elMax.textContent = `${Math.round(this.tempMax)}°C`;
         }
+    }
+
+    _compressFieldData() {
+        if (!this.colorData || this.colorData.length === 0) return;
+        const factor = this._compressFactor;
+        const rows = this.resolution.rows;
+        const cols = this.resolution.cols;
+        const compRows = Math.max(4, Math.ceil(rows / factor));
+        const compCols = Math.max(4, Math.ceil(cols / factor));
+
+        const compressed = [];
+        for (let cr = 0; cr < compRows; cr++) {
+            compressed[cr] = [];
+            for (let cc = 0; cc < compCols; cc++) {
+                let rSum = 0, gSum = 0, bSum = 0, aSum = 0, count = 0;
+                for (let dr = 0; dr < factor; dr++) {
+                    for (let dc = 0; dc < factor; dc++) {
+                        const r = cr * factor + dr;
+                        const c = cc * factor + dc;
+                        if (r < rows && c < cols && this.colorData[r][c]) {
+                            const rgba = this._parseRgba(this.colorData[r][c]);
+                            rSum += rgba.r;
+                            gSum += rgba.g;
+                            bSum += rgba.b;
+                            aSum += rgba.a;
+                            count++;
+                        }
+                    }
+                }
+                if (count > 0) {
+                    compressed[cr][cc] = `rgba(${Math.round(rSum / count)},${Math.round(gSum / count)},${Math.round(bSum / count)},${(aSum / count).toFixed(2)})`;
+                } else {
+                    compressed[cr][cc] = 'rgba(0,0,0,0)';
+                }
+            }
+        }
+
+        this._compressedData = { rows: compRows, cols: compCols, pixels: compressed };
+        this._hashCompressedData();
+    }
+
+    _parseRgba(str) {
+        const m = str.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+        if (m) {
+            return {
+                r: parseInt(m[1]),
+                g: parseInt(m[2]),
+                b: parseInt(m[3]),
+                a: m[4] !== undefined ? parseFloat(m[4]) : 1
+            };
+        }
+        return { r: 0, g: 0, b: 0, a: 0 };
+    }
+
+    _hashCompressedData() {
+        if (!this._compressedData) { this._lastDataHash = ''; return; }
+        let h = 0;
+        const { rows, cols, pixels } = this._compressedData;
+        const step = Math.max(1, Math.floor((rows * cols) / 64));
+        for (let i = 0; i < rows * cols; i += step) {
+            const r = Math.floor(i / cols);
+            const c = i % cols;
+            const px = pixels[r]?.[c] || '';
+            for (let j = 0; j < px.length; j++) {
+                h = ((h << 5) - h + px.charCodeAt(j)) | 0;
+            }
+        }
+        this._lastDataHash = String(h);
     }
 
     _regenerateFromZones() {
@@ -137,6 +231,7 @@ export class TempFieldVisualization {
                 this.colorData[r][c] = this._tempToRgba(temp);
             }
         }
+        this._compressFieldData();
     }
 
     _interp(a, b, t) {
@@ -148,8 +243,11 @@ export class TempFieldVisualization {
         const dt = (now - this.lastFrameTime) / 1000;
         this.lastFrameTime = now;
         this.animationTime += dt;
+        this._frameCounter++;
 
-        this._draw();
+        if (this._frameCounter % this._drawSkip === 0) {
+            this._draw();
+        }
 
         requestAnimationFrame(this._animate);
     }
@@ -172,12 +270,14 @@ export class TempFieldVisualization {
         this._drawFurnaceOutline(ctx, fieldX, fieldY, fieldW, fieldH);
 
         if (this.colorData && this.colorData.length > 0) {
-            this._drawTemperatureField(ctx, fieldX, fieldY, fieldW, fieldH);
+            this._drawTemperatureFieldOptimized(ctx, fieldX, fieldY, fieldW, fieldH);
         }
 
         this._drawZoneLabels(ctx, fieldX, fieldY, fieldW, fieldH);
-        this._drawIsotherms(ctx, fieldX, fieldY, fieldW, fieldH);
-        this._drawFlowArrows(ctx, fieldX, fieldY, fieldW, fieldH);
+        if (!this._isMobile) {
+            this._drawIsotherms(ctx, fieldX, fieldY, fieldW, fieldH);
+            this._drawFlowArrows(ctx, fieldX, fieldY, fieldW, fieldH);
+        }
         this._drawColorBar(ctx, W - 60, fieldY, 25, fieldH);
         this._drawAxis(ctx, fieldX, fieldY, fieldW, fieldH);
     }
@@ -186,6 +286,8 @@ export class TempFieldVisualization {
         const ctx = this.ctx;
         ctx.fillStyle = '#0a0f14';
         ctx.fillRect(0, 0, W, H);
+
+        if (this._isMobile) return;
 
         ctx.strokeStyle = 'rgba(78, 205, 196, 0.04)';
         ctx.lineWidth = 1;
@@ -224,7 +326,7 @@ export class TempFieldVisualization {
         ctx.stroke();
     }
 
-    _drawTemperatureField(ctx, x, y, w, h) {
+    _drawTemperatureFieldOptimized(ctx, x, y, w, h) {
         ctx.save();
 
         ctx.beginPath();
@@ -235,276 +337,220 @@ export class TempFieldVisualization {
         ctx.closePath();
         ctx.clip();
 
-        const rows = this.resolution.rows;
-        const cols = this.resolution.cols;
-        const pixelW = w / cols;
-        const pixelH = h / rows;
-
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                const px = x + c * pixelW;
-                const py = y + r * pixelH;
-                ctx.fillStyle = this.colorData[r][c];
-                ctx.fillRect(px, py, pixelW + 0.5, pixelH + 0.5);
+        if (this._compressedData) {
+            const { rows: cRows, cols: cCols, pixels } = this._compressedData;
+            const off = this._offscreenCanvas;
+            if (off.width !== cCols || off.height !== cRows) {
+                off.width = cCols;
+                off.height = cRows;
             }
-        }
+            const octx = this._offscreenCtx;
+            const imgData = octx.createImageData(cCols, cRows);
+            const buf = imgData.data;
 
-        ctx.globalCompositeOperation = 'overlay';
-        const time = this.animationTime;
-        for (let i = 0; i < 8; i++) {
-            const waveY = y + ((time * 20 + i * 30) % h);
-            const waveGrad = ctx.createLinearGradient(0, waveY - 30, 0, waveY + 30);
-            waveGrad.addColorStop(0, 'rgba(255, 200, 100, 0)');
-            waveGrad.addColorStop(0.5, 'rgba(255, 200, 100, 0.15)');
-            waveGrad.addColorStop(1, 'rgba(255, 200, 100, 0)');
-            ctx.fillStyle = waveGrad;
-            ctx.fillRect(x, waveY - 30, w, 60);
-        }
+            for (let r = 0; r < cRows; r++) {
+                for (let c = 0; c < cCols; c++) {
+                    const rgba = this._parseRgba(pixels[r][c]);
+                    const idx = (r * cCols + c) * 4;
+                    buf[idx] = rgba.r;
+                    buf[idx + 1] = rgba.g;
+                    buf[idx + 2] = rgba.b;
+                    buf[idx + 3] = Math.round(rgba.a * 255);
+                }
+            }
+            octx.putImageData(imgData, 0, 0);
 
-        ctx.globalCompositeOperation = 'source-over';
-        ctx.restore();
-    }
-
-    _drawIsotherms(ctx, x, y, w, h) {
-        const tempSteps = [600, 800, 1000, 1200, 1400];
-        ctx.save();
-
-        ctx.beginPath();
-        ctx.moveTo(x + 5, y + h);
-        ctx.lineTo(x + 18, y);
-        ctx.lineTo(x + w - 18, y);
-        ctx.lineTo(x + w - 5, y + h);
-        ctx.closePath();
-        ctx.clip();
-
-        tempSteps.forEach(temp => {
-            if (temp < this.tempMin || temp > this.tempMax) return;
-
-            ctx.strokeStyle = `rgba(255, 255, 255, 0.25)`;
-            ctx.lineWidth = 1;
-            ctx.setLineDash([4, 4]);
-            ctx.beginPath();
-
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = this._isMobile ? 'low' : 'medium';
+            ctx.drawImage(off, x, y, w, h);
+        } else {
             const rows = this.resolution.rows;
             const cols = this.resolution.cols;
-            let started = false;
+            const pixelW = w / cols;
+            const pixelH = h / rows;
 
-            for (let c = 0; c < cols; c++) {
-                let foundRow = -1;
-                for (let r = 0; r < rows - 1; r++) {
-                    const t1 = this.fieldData[r][c];
-                    const t2 = this.fieldData[r + 1][c];
-                    if ((t1 - temp) * (t2 - temp) <= 0) {
-                        const interp = (temp - t1) / (t2 - t1 || 1);
-                        foundRow = r + interp;
-                        break;
-                    }
-                }
-                if (foundRow >= 0) {
-                    const px = x + (c / (cols - 1)) * w;
-                    const py = y + (foundRow / (rows - 1)) * h;
-                    if (!started) {
-                        ctx.moveTo(px, py);
-                        started = true;
-                    } else {
-                        ctx.lineTo(px, py);
-                    }
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const px = x + c * pixelW;
+                    const py = y + r * pixelH;
+                    ctx.fillStyle = this.colorData[r][c];
+                    ctx.fillRect(px, py, pixelW + 0.5, pixelH + 0.5);
                 }
             }
-
-            ctx.stroke();
-            ctx.setLineDash([]);
-        });
+        }
 
         ctx.restore();
     }
 
-    _drawFlowArrows(ctx, x, y, w, h) {
-        ctx.save();
-        ctx.globalAlpha = 0.4 + 0.2 * Math.sin(this.animationTime * 2);
-        ctx.strokeStyle = '#ffffff';
-        ctx.fillStyle = '#ffffff';
-        ctx.lineWidth = 1.5;
-
-        const arrows = [
-            { px: 0.5, py: 0.9, dx: 0, dy: -1 },
-            { px: 0.3, py: 0.75, dx: 0.1, dy: -0.8 },
-            { px: 0.7, py: 0.75, dx: -0.1, dy: -0.8 },
-            { px: 0.25, py: 0.5, dx: 0.2, dy: -0.6 },
-            { px: 0.75, py: 0.5, dx: -0.2, dy: -0.6 },
-            { px: 0.5, py: 0.3, dx: 0, dy: -0.4 },
-        ];
-
-        arrows.forEach(arr => {
-            const ax = x + arr.px * w;
-            const ay = y + arr.py * h;
-            const len = 18 + 5 * Math.sin(this.animationTime * 3 + arr.px * 10);
-
-            ctx.beginPath();
-            ctx.moveTo(ax, ay);
-            ctx.lineTo(ax + arr.dx * len, ay + arr.dy * len);
-            ctx.stroke();
-
-            const angle = Math.atan2(arr.dy, arr.dx);
-            const headLen = 6;
-            ctx.beginPath();
-            ctx.moveTo(ax + arr.dx * len, ay + arr.dy * len);
-            ctx.lineTo(
-                ax + arr.dx * len - headLen * Math.cos(angle - Math.PI / 6),
-                ay + arr.dy * len - headLen * Math.sin(angle - Math.PI / 6)
-            );
-            ctx.lineTo(
-                ax + arr.dx * len - headLen * Math.cos(angle + Math.PI / 6),
-                ay + arr.dy * len - headLen * Math.sin(angle + Math.PI / 6)
-            );
-            ctx.closePath();
-            ctx.fill();
-        });
-
-        ctx.restore();
+    _drawTemperatureField(ctx, x, y, w, h) {
+        this._drawTemperatureFieldOptimized(ctx, x, y, w, h);
     }
 
     _drawZoneLabels(ctx, x, y, w, h) {
-        const zones = [
-            { name: '炉顶', py: 0.08, temp: this.zones[0] },
-            { name: '上部', py: 0.3, temp: this.zones[1] },
-            { name: '中部', py: 0.52, temp: this.zones[2] },
-            { name: '下部', py: 0.74, temp: this.zones[3] },
-            { name: '炉缸', py: 0.92, temp: this.zones[4] },
-        ];
+        const zoneNames = ['炉顶区', '预热区', '还原区', '熔化区', '炉缸区'];
+        const zoneYs = [0.1, 0.3, 0.52, 0.75, 0.92];
 
-        ctx.font = '11px sans-serif';
-        zones.forEach(z => {
-            const zy = y + z.py * h;
+        ctx.font = 'bold 11px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
 
-            ctx.fillStyle = 'rgba(15, 25, 40, 0.7)';
-            const labelW = 72;
-            const labelH = 20;
-            ctx.fillRect(x - labelW - 8, zy - labelH / 2, labelW, labelH);
+        for (let i = 0; i < 5; i++) {
+            const yy = y + h * zoneYs[i];
+            const temp = this.zones[i];
+            ctx.fillStyle = 'rgba(255, 220, 150, 0.9)';
+            ctx.fillText(`${zoneNames[i]} ${Math.round(temp)}°C`, x - 8, yy);
 
-            ctx.fillStyle = '#9bb0c7';
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(z.name, x - labelW / 2 - 8, zy - 6);
-
-            ctx.fillStyle = '#ffc857';
-            ctx.font = 'bold 11px Consolas, monospace';
-            ctx.fillText(`${Math.round(z.temp)}°C`, x - labelW / 2 - 8, zy + 7);
-
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([2, 4]);
+            ctx.strokeStyle = 'rgba(255, 220, 150, 0.15)';
+            ctx.setLineDash([3, 4]);
             ctx.beginPath();
-            ctx.moveTo(x - 8, zy);
-            ctx.lineTo(x + 8, zy);
+            ctx.moveTo(x, yy);
+            ctx.lineTo(x + w, yy);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+    }
+
+    _drawIsotherms(ctx, x, y, w, h) {
+        const temps = [600, 800, 1000, 1200, 1400];
+        const rows = this.resolution.rows;
+        const cols = this.resolution.cols;
+
+        ctx.lineWidth = 1;
+        ctx.font = '10px sans-serif';
+
+        for (const target of temps) {
+            ctx.strokeStyle = this._tempToRgba(target).replace(/[\d.]+\)$/, '0.6)');
+            ctx.setLineDash([2, 3]);
+            ctx.beginPath();
+            let started = false;
+
+            for (let r = 1; r < rows; r += 2) {
+                for (let c = 1; c < cols; c += 2) {
+                    if (!this.fieldData[r]) continue;
+                    const v00 = this.fieldData[r][c];
+                    if (v00 === undefined) continue;
+                    if ((v00 >= target && this.fieldData[r - 1]?.[c - 1] < target) ||
+                        (v00 < target && this.fieldData[r - 1]?.[c - 1] >= target)) {
+                        const px = x + (c / cols) * w;
+                        const py = y + (r / rows) * h;
+                        if (!started) {
+                            ctx.moveTo(px, py);
+                            started = true;
+                        } else {
+                            ctx.lineTo(px, py);
+                        }
+                    }
+                }
+            }
             ctx.stroke();
             ctx.setLineDash([]);
 
-            ctx.font = '11px sans-serif';
-        });
+            const labelX = x + w - 30;
+            const norm = Math.max(0, Math.min(1, (target - this.tempMin) / (this.tempMax - this.tempMin)));
+            const labelY = y + h * (1 - norm);
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';
+            ctx.fillText(`${target}°`, labelX, labelY);
+        }
+    }
+
+    _drawFlowArrows(ctx, x, y, w, h) {
+        const positions = [
+            { rx: 0.5, ry: 0.9, dx: 0, dy: -1 },
+            { rx: 0.3, ry: 0.7, dx: 0.15, dy: -0.8 },
+            { rx: 0.7, ry: 0.7, dx: -0.15, dy: -0.8 },
+            { rx: 0.25, ry: 0.45, dx: 0.3, dy: -0.6 },
+            { rx: 0.75, ry: 0.45, dx: -0.3, dy: -0.6 },
+            { rx: 0.5, ry: 0.15, dx: 0, dy: 1 },
+        ];
+
+        for (const p of positions) {
+            const ax = x + p.rx * w;
+            const ay = y + p.ry * h;
+            const len = 12;
+            const angle = Math.atan2(p.dy, p.dx) + Math.sin(this.animationTime + p.rx * 10) * 0.2;
+            const ex = ax + Math.cos(angle) * len;
+            const ey = ay + Math.sin(angle) * len;
+
+            ctx.strokeStyle = 'rgba(255, 200, 100, 0.35)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(ex, ey);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(ex, ey);
+            ctx.lineTo(ex - Math.cos(angle - 0.4) * 5, ey - Math.sin(angle - 0.4) * 5);
+            ctx.moveTo(ex, ey);
+            ctx.lineTo(ex - Math.cos(angle + 0.4) * 5, ey - Math.sin(angle + 0.4) * 5);
+            ctx.stroke();
+        }
     }
 
     _drawColorBar(ctx, x, y, w, h) {
-        const steps = 50;
+        const steps = 64;
         for (let i = 0; i < steps; i++) {
-            const t = 1 - (i / (steps - 1));
+            const t = i / (steps - 1);
             const temp = this.tempMin + t * (this.tempMax - this.tempMin);
             ctx.fillStyle = this._tempToRgba(temp);
-            ctx.fillRect(x, y + (i / steps) * h, w, h / steps + 1);
+            const rectY = y + h * (1 - t);
+            ctx.fillRect(x, rectY - 1, w, h / steps + 1);
         }
 
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
         ctx.lineWidth = 1;
         ctx.strokeRect(x, y, w, h);
 
-        ctx.fillStyle = '#9bb0c7';
-        ctx.font = '10px Consolas, monospace';
+        ctx.fillStyle = 'rgba(255,255,255,0.8)';
+        ctx.font = '10px sans-serif';
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-
-        const labels = 5;
-        for (let i = 0; i < labels; i++) {
-            const t = i / (labels - 1);
-            const temp = this.tempMax - t * (this.tempMax - this.tempMin);
-            const ly = y + t * h;
-            ctx.fillText(`${Math.round(temp)}°`, x + w + 4, ly);
-
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-            ctx.beginPath();
-            ctx.moveTo(x - 3, ly);
-            ctx.lineTo(x, ly);
-            ctx.stroke();
-        }
+        ctx.fillText(`${Math.round(this.tempMin)}°C`, x + w + 5, y + h);
+        ctx.fillText(`${Math.round(this.tempMax)}°C`, x + w + 5, y);
+        ctx.fillText(`${Math.round((this.tempMin + this.tempMax) / 2)}°C`, x + w + 5, y + h / 2);
     }
 
     _drawAxis(ctx, x, y, w, h) {
-        ctx.strokeStyle = 'rgba(155, 176, 199, 0.4)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
         ctx.lineWidth = 1;
-        ctx.fillStyle = '#6b7c93';
-        ctx.font = '10px sans-serif';
-
         ctx.beginPath();
-        ctx.moveTo(x, y + h + 10);
-        ctx.lineTo(x + w, y + h + 10);
+        ctx.moveTo(x, y + h + 5);
+        ctx.lineTo(x + w, y + h + 5);
+        ctx.moveTo(x - 5, y);
+        ctx.lineTo(x - 5, y + h);
         ctx.stroke();
 
-        ctx.fillStyle = '#6b7c93';
+        ctx.fillStyle = 'rgba(255,255,255,0.5)';
+        ctx.font = '9px sans-serif';
         ctx.textAlign = 'center';
-        ctx.fillText('炉径向 →', x + w / 2, y + h + 22);
+        ctx.fillText('径向 →', x + w / 2, y + h + 18);
 
-        const xticks = 5;
-        for (let i = 0; i < xticks; i++) {
-            const tx = x + (i / (xticks - 1)) * w;
-            ctx.strokeStyle = 'rgba(155, 176, 199, 0.3)';
-            ctx.beginPath();
-            ctx.moveTo(tx, y + h + 10);
-            ctx.lineTo(tx, y + h + 14);
-            ctx.stroke();
-        }
+        ctx.save();
+        ctx.translate(x - 28, y + h / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center';
+        ctx.fillText('高度 ↑ (炉缸→炉顶)', 0, 0);
+        ctx.restore();
     }
 
     _tempToRgba(temp) {
         const t = Math.max(0, Math.min(1, (temp - this.tempMin) / (this.tempMax - this.tempMin)));
-        let r, g, b, a = 1;
 
         if (t < 0.2) {
-            const p = t / 0.2;
-            r = 78 + p * 150;
-            g = 205 - p * 40;
-            b = 196 - p * 120;
+            const k = t / 0.2;
+            return `rgba(20,${Math.round(80 + 100 * k)},${Math.round(120 + 80 * k)},0.92)`;
         } else if (t < 0.4) {
-            const p = (t - 0.2) / 0.2;
-            r = 228 + p * 12;
-            g = 165 + p * 35;
-            b = 76 - p * 40;
+            const k = (t - 0.2) / 0.2;
+            return `rgba(${Math.round(40 + 100 * k)},${Math.round(180 + 30 * k)},${Math.round(200 - 150 * k)},0.92)`;
         } else if (t < 0.6) {
-            const p = (t - 0.4) / 0.2;
-            r = 240 + p * 15;
-            g = 200 + p * 0;
-            b = 36 - p * 20;
+            const k = (t - 0.4) / 0.2;
+            return `rgba(${Math.round(140 + 100 * k)},${Math.round(210 - 30 * k)},${Math.round(50 - 50 * k)},0.92)`;
         } else if (t < 0.8) {
-            const p = (t - 0.6) / 0.2;
-            r = 255;
-            g = 200 - p * 50;
-            b = 16 - p * 16;
+            const k = (t - 0.6) / 0.2;
+            return `rgba(${Math.round(240 - 10 * k)},${Math.round(180 - 80 * k)},0,0.92)`;
         } else {
-            const p = (t - 0.8) / 0.2;
-            r = 255;
-            g = 150 - p * 80;
-            b = 0;
+            const k = (t - 0.8) / 0.2;
+            return `rgba(${Math.round(230 + 25 * k)},${Math.round(100 + 50 * k)},${Math.round(0 + 80 * k)},0.92)`;
         }
-
-        return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, ${a})`;
-    }
-
-    _hexToRgba(hex) {
-        const m = hex.replace('#', '').match(/.{2}/g);
-        if (!m || m.length < 3) return 'rgba(255, 100, 0, 1)';
-        const r = parseInt(m[0], 16);
-        const g = parseInt(m[1], 16);
-        const b = parseInt(m[2], 16);
-        return `rgba(${r}, ${g}, ${b}, 1)`;
     }
 }
-
-export default TempFieldVisualization;
